@@ -26,11 +26,56 @@ var import_express = __toESM(require("express"), 1);
 var import_path = __toESM(require("path"), 1);
 var import_fs = __toESM(require("fs"), 1);
 var import_vite = require("vite");
-var LEADS_FILE = import_path.default.join(process.cwd(), "leads.json");
-function ensureLeadsFile() {
-  if (!import_fs.default.existsSync(LEADS_FILE)) {
-    import_fs.default.writeFileSync(LEADS_FILE, JSON.stringify([], null, 2), "utf-8");
+var DATA_DIR = import_path.default.join(process.cwd(), "data");
+var LEADS_FILE = import_path.default.join(DATA_DIR, "leads.json");
+var LEGACY_LEADS_FILE = import_path.default.join(process.cwd(), "leads.json");
+function readAllLeads() {
+  let leads = [];
+  try {
+    if (!import_fs.default.existsSync(DATA_DIR)) {
+      import_fs.default.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (import_fs.default.existsSync(LEADS_FILE)) {
+      const raw = import_fs.default.readFileSync(LEADS_FILE, "utf-8");
+      if (raw && raw.trim().length > 0) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          leads = parsed;
+        }
+      }
+    }
+    if (leads.length === 0 && import_fs.default.existsSync(LEGACY_LEADS_FILE)) {
+      const legacyRaw = import_fs.default.readFileSync(LEGACY_LEADS_FILE, "utf-8");
+      if (legacyRaw && legacyRaw.trim().length > 0) {
+        const parsedLegacy = JSON.parse(legacyRaw);
+        if (Array.isArray(parsedLegacy) && parsedLegacy.length > 0) {
+          leads = parsedLegacy;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Error reading leads file:", err);
   }
+  return leads;
+}
+function writeAllLeads(leads) {
+  try {
+    if (!import_fs.default.existsSync(DATA_DIR)) {
+      import_fs.default.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    const dataString = JSON.stringify(leads, null, 2);
+    import_fs.default.writeFileSync(LEADS_FILE, dataString, "utf-8");
+    try {
+      import_fs.default.writeFileSync(LEGACY_LEADS_FILE, dataString, "utf-8");
+    } catch (e) {
+    }
+  } catch (err) {
+    console.error("Error writing leads file:", err);
+  }
+}
+function ensureLeadsFile() {
+  const leads = readAllLeads();
+  writeAllLeads(leads);
 }
 async function startServer() {
   ensureLeadsFile();
@@ -46,23 +91,15 @@ async function startServer() {
       if (!nome || !whatsapp) {
         return res.status(400).json({ error: "Nome e WhatsApp s\xE3o obrigat\xF3rios." });
       }
-      ensureLeadsFile();
-      const raw = import_fs.default.readFileSync(LEADS_FILE, "utf-8");
-      let leads = [];
-      try {
-        leads = JSON.parse(raw);
-        if (!Array.isArray(leads)) leads = [];
-      } catch (e) {
-        leads = [];
-      }
+      const leads = readAllLeads();
       const newLead = {
         id: `lead_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
         createdAt: (/* @__PURE__ */ new Date()).toISOString(),
         dataRegistroBR: (/* @__PURE__ */ new Date()).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }),
-        nome: nome.trim(),
-        whatsapp: whatsapp.trim(),
-        email: email ? email.trim() : "",
-        origem: origem ? origem.trim() : "",
+        nome: String(nome).trim(),
+        whatsapp: String(whatsapp).trim(),
+        email: email ? String(email).trim() : "",
+        origem: origem ? String(origem).trim() : "",
         passageiros: passageiros || "1 pessoa",
         prazo: prazo || "",
         destinoInteresse: destinoInteresse || "Europa",
@@ -70,23 +107,12 @@ async function startServer() {
         clickedWhatsApp: Boolean(clickedWhatsApp),
         status: clickedWhatsApp ? "converteu_whatsapp" : "lead_sem_whatsapp_remarketing",
         userAgent: userAgent || req.headers["user-agent"] || "",
+        referrer: referrer || "",
         ip: req.headers["x-forwarded-for"] || req.socket.remoteAddress || ""
       };
-      const existingIdx = leads.findIndex((l) => l.whatsapp.replace(/\D/g, "") === newLead.whatsapp.replace(/\D/g, ""));
-      if (existingIdx >= 0) {
-        leads[existingIdx] = {
-          ...leads[existingIdx],
-          ...newLead,
-          updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          // preserve clicked status if true
-          clickedWhatsApp: leads[existingIdx].clickedWhatsApp || newLead.clickedWhatsApp,
-          status: leads[existingIdx].clickedWhatsApp || newLead.clickedWhatsApp ? "converteu_whatsapp" : "lead_sem_whatsapp_remarketing"
-        };
-      } else {
-        leads.unshift(newLead);
-      }
-      import_fs.default.writeFileSync(LEADS_FILE, JSON.stringify(leads, null, 2), "utf-8");
-      return res.status(200).json({ success: true, leadId: newLead.id });
+      leads.unshift(newLead);
+      writeAllLeads(leads);
+      return res.status(200).json({ success: true, leadId: newLead.id, totalLeads: leads.length });
     } catch (err) {
       console.error("Error saving lead:", err);
       return res.status(500).json({ error: "Erro ao registrar lead internamente." });
@@ -96,23 +122,19 @@ async function startServer() {
     try {
       const { whatsapp } = req.body;
       if (!whatsapp) return res.status(400).json({ error: "WhatsApp missing" });
-      ensureLeadsFile();
-      const raw = import_fs.default.readFileSync(LEADS_FILE, "utf-8");
-      let leads = JSON.parse(raw);
-      if (Array.isArray(leads)) {
-        const clean = whatsapp.replace(/\D/g, "");
-        leads = leads.map((l) => {
-          if (l.whatsapp.replace(/\D/g, "") === clean) {
-            return {
-              ...l,
-              clickedWhatsApp: true,
-              status: "converteu_whatsapp",
-              whatsappClickedAt: (/* @__PURE__ */ new Date()).toISOString()
-            };
-          }
-          return l;
-        });
-        import_fs.default.writeFileSync(LEADS_FILE, JSON.stringify(leads, null, 2), "utf-8");
+      const clean = String(whatsapp).replace(/\D/g, "");
+      const leads = readAllLeads();
+      let updated = false;
+      for (const l of leads) {
+        if ((l.whatsapp || "").replace(/\D/g, "") === clean) {
+          l.clickedWhatsApp = true;
+          l.status = "converteu_whatsapp";
+          l.whatsappClickedAt = (/* @__PURE__ */ new Date()).toISOString();
+          updated = true;
+        }
+      }
+      if (updated) {
+        writeAllLeads(leads);
       }
       return res.status(200).json({ success: true });
     } catch (e) {
@@ -121,9 +143,7 @@ async function startServer() {
   });
   app.get("/api/leads", (req, res) => {
     try {
-      ensureLeadsFile();
-      const raw = import_fs.default.readFileSync(LEADS_FILE, "utf-8");
-      const leads = JSON.parse(raw);
+      const leads = readAllLeads();
       res.json({ count: leads.length, leads });
     } catch (err) {
       res.status(500).json({ error: "Erro ao ler leads." });
@@ -131,9 +151,7 @@ async function startServer() {
   });
   app.get("/api/leads/export.csv", (req, res) => {
     try {
-      ensureLeadsFile();
-      const raw = import_fs.default.readFileSync(LEADS_FILE, "utf-8");
-      const leads = JSON.parse(raw);
+      const leads = readAllLeads();
       let csv = "data_cadastro,nome,primeiro_nome,sobrenome,telefone_whatsapp,origem,passageiros,prazo_viagem,destino,tipo_viagem,status_whatsapp\n";
       for (const l of leads) {
         const names = (l.nome || "").trim().split(" ");
@@ -155,7 +173,18 @@ async function startServer() {
   });
   if (process.env.NODE_ENV !== "production") {
     const vite = await (0, import_vite.createServer)({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        watch: {
+          ignored: [
+            "**/data/**",
+            "**/leads.json",
+            "**/.data/**",
+            "**/*.log",
+            "**/node_modules/**"
+          ]
+        }
+      },
       appType: "spa"
     });
     app.use(vite.middlewares);
